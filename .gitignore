@@ -12,6 +12,14 @@ build/
 develop-eggs/
 dist/
 downloads/
+data/
+models/
+*.zip
+*.csv
+*.pickle
+*.pkl
+__pycache__/
+.ipynb_checkpoints/
 eggs/
 .eggs/
 lib/
