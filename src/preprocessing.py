@@ -69,3 +69,74 @@ def compute_cancellation(df: pd.DataFrame,
 	result[target_col] = result[user_col].isin(cancelled_users).astype(int)
 
 	return result
+
+
+def aggregate_user_day_activity(df: pd.DataFrame,
+                                  user_col: str = 'userId',
+                                  time_col: str = 'time',
+                                  page_col: str = 'page',
+                                  drop_cancellation: bool = True) -> pd.DataFrame:
+	"""
+	Aggregate user activity data by userId and day, creating count columns for each page category.
+	
+	This function takes event-level data and aggregates it to the user-day level,
+	creating a single row for each user's activity on a given day. Each unique
+	page category becomes a column containing the count of that page type.
+	
+	Parameters
+	----------
+	df : pd.DataFrame
+		Input DataFrame containing user event data
+	user_col : str, default 'userId'
+		Column name identifying the user
+	time_col : str, default 'time'
+		Column name containing timestamps (should be datetime type)
+	page_col : str, default 'page'
+		Column name containing page/event categories
+	drop_cancellation : bool, default True
+		Whether to drop the 'Cancellation Confirmation' column from results
+		(typically used as a target variable rather than a feature)
+	
+	Returns
+	-------
+	pd.DataFrame
+		Aggregated DataFrame with columns:
+		- user_col: User identifier
+		- 'date': Date extracted from time_col
+		- One column per unique page category with count values
+	
+	Raises
+	------
+	ValueError
+		If required columns are not found in the DataFrame
+	
+	Example
+	-------
+	>>> df_aggregated = aggregate_user_day_activity(df)
+	>>> print(df_aggregated.shape)
+	(205676, 21)
+	>>> print(df_aggregated.columns.tolist()[:5])
+	['userId', 'date', 'About', 'Add Friend', 'Add to Playlist']
+	"""
+	# Validate required columns
+	if user_col not in df.columns:
+		raise ValueError(f"user_col '{user_col}' not found in DataFrame")
+	if time_col not in df.columns:
+		raise ValueError(f"time_col '{time_col}' not found in DataFrame")
+	if page_col not in df.columns:
+		raise ValueError(f"page_col '{page_col}' not found in DataFrame")
+	
+	# Work with a copy to avoid modifying the original
+	df_copy = df.copy()
+	
+	# Extract the date from the time column
+	df_copy['date'] = df_copy[time_col].dt.date
+	
+	# Create pivot table with counts for each page category per user per day
+	df_aggregated = df_copy.groupby([user_col, 'date', page_col]).size().unstack(fill_value=0).reset_index()
+	
+	# Optionally drop the cancellation confirmation column
+	if drop_cancellation and 'Cancellation Confirmation' in df_aggregated.columns:
+		df_aggregated = df_aggregated.drop(columns=['Cancellation Confirmation'])
+	
+	return df_aggregated
