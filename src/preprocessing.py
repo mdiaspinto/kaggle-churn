@@ -75,7 +75,8 @@ def aggregate_user_day_activity(df: pd.DataFrame,
                                   user_col: str = 'userId',
                                   time_col: str = 'time',
                                   page_col: str = 'page',
-                                  drop_cancellation: bool = True) -> pd.DataFrame:
+                                  drop_cancellation: bool = True,
+                                  fill_missing_days: bool = True) -> pd.DataFrame:
 	"""
 	Aggregate user activity data by userId and day, creating count columns for each page category.
 	
@@ -96,6 +97,10 @@ def aggregate_user_day_activity(df: pd.DataFrame,
 	drop_cancellation : bool, default True
 		Whether to drop the 'Cancellation Confirmation' column from results
 		(typically used as a target variable rather than a feature)
+	fill_missing_days : bool, default True
+		Whether to fill missing days between each user's first and last activity
+		with zeros. This ensures inactive days are represented in the dataset,
+		which is critical for time-series modeling with sliding windows.
 	
 	Returns
 	-------
@@ -104,6 +109,7 @@ def aggregate_user_day_activity(df: pd.DataFrame,
 		- user_col: User identifier
 		- 'date': Date extracted from time_col
 		- One column per unique page category with count values
+		When fill_missing_days=True, inactive days are included with zero counts.
 	
 	Raises
 	------
@@ -112,7 +118,7 @@ def aggregate_user_day_activity(df: pd.DataFrame,
 	
 	Example
 	-------
-	>>> df_aggregated = aggregate_user_day_activity(df)
+	>>> df_aggregated = aggregate_user_day_activity(df, fill_missing_days=True)
 	>>> print(df_aggregated.shape)
 	(205676, 21)
 	>>> print(df_aggregated.columns.tolist()[:5])
@@ -129,8 +135,8 @@ def aggregate_user_day_activity(df: pd.DataFrame,
 	# Work with a copy to avoid modifying the original
 	df_copy = df.copy()
 	
-	# Extract the date from the time column
-	df_copy['date'] = df_copy[time_col].dt.date
+	# Extract the date from the time column and normalize
+	df_copy['date'] = pd.to_datetime(df_copy[time_col]).dt.normalize()
 	
 	# Create pivot table with counts for each page category per user per day
 	df_aggregated = df_copy.groupby([user_col, 'date', page_col]).size().unstack(fill_value=0).reset_index()
@@ -139,11 +145,35 @@ def aggregate_user_day_activity(df: pd.DataFrame,
 	if drop_cancellation and 'Cancellation Confirmation' in df_aggregated.columns:
 		df_aggregated = df_aggregated.drop(columns=['Cancellation Confirmation'])
 	
+	# Fill missing days with zeros per user if requested
+	if fill_missing_days:
+		activity_cols = [col for col in df_aggregated.columns if col not in [user_col, 'date']]
+		filled_users = []
+		
+		for user_id, user_data in df_aggregated.groupby(user_col):
+			# Create full date range for this user
+			full_range = pd.date_range(user_data['date'].min(), user_data['date'].max(), freq='D')
+			
+			# Reindex to include all days
+			user_filled = user_data.set_index('date').reindex(full_range)
+			user_filled[user_col] = user_id
+			
+			# Fill activity columns with zeros for inactive days
+			user_filled[activity_cols] = user_filled[activity_cols].fillna(0).astype(int)
+			
+			user_filled.index.name = 'date'
+			filled_users.append(user_filled.reset_index())
+		
+		df_aggregated = pd.concat(filled_users, ignore_index=True)
+	
+	# Convert date back to date type (not datetime) for consistency
+	df_aggregated['date'] = df_aggregated['date'].dt.date
+	
 	return df_aggregated
 
 
 def add_days_since(df: pd.DataFrame,
-                           columns_to_track: list = None,
+                           columns_to_track: list = ['Submit Downgrade', 'Submit Upgrade', 'Cancel'],
                            user_col: str = 'userId',
                            date_col: str = 'date') -> pd.DataFrame:
 	"""
@@ -182,9 +212,7 @@ def add_days_since(df: pd.DataFrame,
 	['userId', 'date', ..., 'days_since_submit_downgrade', 
 	 'days_since_submit_upgrade', 'days_since_cancel']
 	"""
-	if columns_to_track is None:
-		columns_to_track = ['Submit Downgrade', 'Submit Upgrade', 'Cancel']
-	
+
 	# Validate required columns
 	if user_col not in df.columns:
 		raise ValueError(f"user_col '{user_col}' not found in DataFrame")
@@ -237,7 +265,8 @@ def add_rolling_averages(df: pd.DataFrame,
                          columns: list = None,
                          n: int = 7,
                          user_col: str = 'userId',
-                         date_col: str = 'date') -> pd.DataFrame:
+						 date_col: str = 'date',
+						 fill_missing_with_zero: bool = True) -> pd.DataFrame:
 	"""
 	Add rolling average columns for specified metrics over the last n days.
 	
@@ -257,6 +286,9 @@ def add_rolling_averages(df: pd.DataFrame,
 		Column name identifying the user
 	date_col : str, default 'date'
 		Column name containing the date values
+	fill_missing_with_zero : bool, default True
+		Whether to fill missing user-days with zeros for the specified columns before
+		computing rolling averages (helps include inactive days in the window)
 	
 	Returns
 	-------
@@ -280,6 +312,8 @@ def add_rolling_averages(df: pd.DataFrame,
 	- The window includes the n days before the row's date, not including the date itself
 	- If a user has fewer than n days of history before a date, the average is over available days
 	- Users with no history in the window will have NaN values
+	- When fill_missing_with_zero is True, gaps in user activity are filled with
+	  zeros so dormant days contribute 0 to the rolling window
 	"""
 	if columns is None:
 		columns = ['NextSong']
@@ -296,46 +330,41 @@ def add_rolling_averages(df: pd.DataFrame,
 	
 	# Work with a copy to avoid modifying the original
 	df_copy = df.copy()
+
+	# Normalize date column to datetime (no time component)
+	df_copy[date_col] = pd.to_datetime(df_copy[date_col]).dt.normalize()
 	
-	# Ensure date column is in date format
-	if not isinstance(df_copy[date_col].iloc[0], (pd.Timestamp, type(pd.Timestamp('2020-01-01').date()))):
-		df_copy[date_col] = pd.to_datetime(df_copy[date_col])
-		if hasattr(df_copy[date_col].iloc[0], 'date'):
-			df_copy[date_col] = df_copy[date_col].dt.date
-	
-	df_copy = df_copy.sort_values([user_col, date_col])
-	
-	# Process each column
-	for col in columns:
-		col_name_lower = col.lower().replace(' ', '_')
-		new_col_name = f'{col_name_lower}_avg_{n}d'
+	# Prepare storage for results
+	processed_users = []
+	for user_id, user_data in df_copy.groupby(user_col):
+		user_data = user_data.sort_values(date_col).copy()
 		
-		# Initialize the new column with NaN
-		df_copy[new_col_name] = None
-		
-		# For each user, calculate rolling averages
-		result_list = []
-		for user_id in df_copy[user_col].unique():
-			user_data = df_copy[df_copy[user_col] == user_id].copy()
+		# Build full daily index per user if requested
+		if fill_missing_with_zero:
+			full_range = pd.date_range(user_data[date_col].min(), user_data[date_col].max(), freq='D')
+			user_data = user_data.set_index(date_col).reindex(full_range)
+			user_data[user_col] = user_id
+			user_data.index.name = date_col
+			user_data = user_data.reset_index()
 			
-			# For each row, calculate the rolling average for the n days before that row's date
-			for idx, row in user_data.iterrows():
-				current_date = row[date_col]
-				window_start = current_date - pd.Timedelta(days=n)
-				
-				# Get the user's historical data in the window (n days before current date, not including current date)
-				user_history = user_data[
-					(user_data[date_col] > window_start) & 
-					(user_data[date_col] < current_date)
-				].copy()
-				
-				if len(user_history) > 0:
-					# Calculate the average for this user over the window
-					avg_value = user_history[col].mean()
-					user_data.loc[idx, new_col_name] = avg_value
-			
-			result_list.append(user_data)
+			# Fill specified metric columns with zeros on missing days
+			for col in columns:
+				user_data[col] = user_data[col].fillna(0)
+		else:
+			# Ensure index is clean for rolling operations without reindexing
+			user_data = user_data.reset_index(drop=True)
 		
-		df_copy = pd.concat(result_list, ignore_index=True)
-	
-	return df_copy
+		# Compute rolling averages per column using prior days only
+		for col in columns:
+			col_name_lower = col.lower().replace(' ', '_')
+			new_col_name = f'{col_name_lower}_avg_{n}d'
+			# shift(1) excludes the current day from the window
+			user_data[new_col_name] = user_data[col].shift(1).rolling(window=n, min_periods=1).mean()
+		
+		processed_users.append(user_data)
+
+	# Combine all users and restore date to date type for consistency
+	result = pd.concat(processed_users, ignore_index=True)
+	result[date_col] = result[date_col].dt.date
+
+	return result
