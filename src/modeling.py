@@ -40,9 +40,11 @@ def prepare_training_data(df_train, target_col='churn_status', exclude_cols=None
     
     # Get feature columns
     feature_cols = [col for col in df_model.columns if col not in exclude_cols]
-    
-    # Prepare features and target
-    X = df_model[feature_cols].fillna(0)
+
+    # One-hot encode categorical features and fill remaining NaNs
+    obj_cols = [col for col in feature_cols if df_model[col].dtype == 'object']
+    X = pd.get_dummies(df_model[feature_cols], columns=obj_cols, drop_first=True).fillna(0)
+    feature_cols = X.columns.tolist()
     y = df_model[target_col].astype(int)
     
     print(f"\nFeatures: {len(feature_cols)} columns")
@@ -197,14 +199,12 @@ def prepare_test_data(df_test_agg, feature_cols, last_date=None):
     
     print(f"Number of users for prediction: {len(df_test_final)}")
     
-    # Add missing columns from training
-    for col in feature_cols:
-        if col not in df_test_final.columns:
-            print(f"Adding missing column: {col}")
-            df_test_final[col] = 0
-    
-    # Select features in correct order
-    X_test = df_test_final[feature_cols].fillna(0)
+    # One-hot encode categorical columns to mirror training encoding
+    obj_cols = [col for col in df_test_final.columns if df_test_final[col].dtype == 'object']
+    df_test_encoded = pd.get_dummies(df_test_final, columns=obj_cols, drop_first=True)
+
+    # Reindex to training feature columns (add missing as 0, drop extras)
+    X_test = df_test_encoded.reindex(columns=feature_cols, fill_value=0).fillna(0)
     
     print(f"Using {len(feature_cols)} features for prediction")
     print(f"Test data shape for prediction: {X_test.shape}")
