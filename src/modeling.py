@@ -6,6 +6,7 @@ import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
+import xgboost as xgb
 
 
 def prepare_training_data(df_train, target_col='churn_status', exclude_cols=None):
@@ -39,9 +40,11 @@ def prepare_training_data(df_train, target_col='churn_status', exclude_cols=None
     
     # Get feature columns
     feature_cols = [col for col in df_model.columns if col not in exclude_cols]
-    
-    # Prepare features and target
-    X = df_model[feature_cols].fillna(0)
+
+    # One-hot encode categorical features and fill remaining NaNs
+    obj_cols = [col for col in feature_cols if df_model[col].dtype == 'object']
+    X = pd.get_dummies(df_model[feature_cols], columns=obj_cols, drop_first=True).fillna(0)
+    feature_cols = X.columns.tolist()
     y = df_model[target_col].astype(int)
     
     print(f"\nFeatures: {len(feature_cols)} columns")
@@ -196,14 +199,12 @@ def prepare_test_data(df_test_agg, feature_cols, last_date=None):
     
     print(f"Number of users for prediction: {len(df_test_final)}")
     
-    # Add missing columns from training
-    for col in feature_cols:
-        if col not in df_test_final.columns:
-            print(f"Adding missing column: {col}")
-            df_test_final[col] = 0
-    
-    # Select features in correct order
-    X_test = df_test_final[feature_cols].fillna(0)
+    # One-hot encode categorical columns to mirror training encoding
+    obj_cols = [col for col in df_test_final.columns if df_test_final[col].dtype == 'object']
+    df_test_encoded = pd.get_dummies(df_test_final, columns=obj_cols, drop_first=True)
+
+    # Reindex to training feature columns (add missing as 0, drop extras)
+    X_test = df_test_encoded.reindex(columns=feature_cols, fill_value=0).fillna(0)
     
     print(f"Using {len(feature_cols)} features for prediction")
     print(f"Test data shape for prediction: {X_test.shape}")
@@ -274,3 +275,57 @@ def create_submission(user_ids, predictions, output_path=None):
         print(f"Saved submission to {output_path}")
     
     return submission
+
+
+def train_xgboost(X_train, y_train, n_estimators=100, max_depth=6, 
+                  learning_rate=0.1, random_state=42, scale_pos_weight=None, 
+                  n_jobs=-1, **kwargs):
+    """
+    Train an XGBoost classifier.
+    
+    Parameters:
+    -----------
+    X_train : pd.DataFrame or np.ndarray
+        Training features
+    y_train : pd.Series or np.ndarray
+        Training target
+    n_estimators : int
+        Number of boosting rounds
+    max_depth : int
+        Maximum depth of trees
+    learning_rate : float
+        Learning rate (eta)
+    random_state : int
+        Random seed
+    scale_pos_weight : float, optional
+        Balancing of positive and negative weights. If None, automatically calculated
+    n_jobs : int
+        Number of parallel jobs (-1 for all cores)
+    **kwargs : additional arguments to pass to XGBClassifier
+    
+    Returns:
+    --------
+    model : XGBClassifier
+        Trained model
+    """
+    # Calculate scale_pos_weight if not provided (for class imbalance)
+    if scale_pos_weight is None:
+        neg_count = (y_train == 0).sum()
+        pos_count = (y_train == 1).sum()
+        scale_pos_weight = neg_count / pos_count
+        print(f"Calculated scale_pos_weight: {scale_pos_weight:.2f}")
+    
+    print("Training XGBoost...")
+    model = xgb.XGBClassifier(
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        learning_rate=learning_rate,
+        random_state=random_state,
+        scale_pos_weight=scale_pos_weight,
+        n_jobs=n_jobs,
+        eval_metric='logloss',
+        **kwargs
+    )
+    model.fit(X_train, y_train)
+    print("Model training complete!")
+    return model
