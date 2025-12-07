@@ -6,6 +6,7 @@ import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
+import xgboost as xgb
 
 
 def prepare_training_data(df_train, target_col='churn_status', exclude_cols=None):
@@ -274,3 +275,57 @@ def create_submission(user_ids, predictions, output_path=None):
         print(f"Saved submission to {output_path}")
     
     return submission
+
+
+def train_xgboost(X_train, y_train, n_estimators=100, max_depth=6, 
+                  learning_rate=0.1, random_state=42, scale_pos_weight=None, 
+                  n_jobs=-1, **kwargs):
+    """
+    Train an XGBoost classifier.
+    
+    Parameters:
+    -----------
+    X_train : pd.DataFrame or np.ndarray
+        Training features
+    y_train : pd.Series or np.ndarray
+        Training target
+    n_estimators : int
+        Number of boosting rounds
+    max_depth : int
+        Maximum depth of trees
+    learning_rate : float
+        Learning rate (eta)
+    random_state : int
+        Random seed
+    scale_pos_weight : float, optional
+        Balancing of positive and negative weights. If None, automatically calculated
+    n_jobs : int
+        Number of parallel jobs (-1 for all cores)
+    **kwargs : additional arguments to pass to XGBClassifier
+    
+    Returns:
+    --------
+    model : XGBClassifier
+        Trained model
+    """
+    # Calculate scale_pos_weight if not provided (for class imbalance)
+    if scale_pos_weight is None:
+        neg_count = (y_train == 0).sum()
+        pos_count = (y_train == 1).sum()
+        scale_pos_weight = neg_count / pos_count
+        print(f"Calculated scale_pos_weight: {scale_pos_weight:.2f}")
+    
+    print("Training XGBoost...")
+    model = xgb.XGBClassifier(
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        learning_rate=learning_rate,
+        random_state=random_state,
+        scale_pos_weight=scale_pos_weight,
+        n_jobs=n_jobs,
+        eval_metric='logloss',
+        **kwargs
+    )
+    model.fit(X_train, y_train)
+    print("Model training complete!")
+    return model

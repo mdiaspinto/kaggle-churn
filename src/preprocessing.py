@@ -173,7 +173,7 @@ def aggregate_user_day_activity(df: pd.DataFrame,
 
 
 def add_days_since(df: pd.DataFrame,
-                           columns_to_track: list = ['Submit Downgrade', 'Submit Upgrade', 'Cancel'],
+                           columns_to_track: list = ['Submit Downgrade', 'Submit Upgrade'],
                            user_col: str = 'userId',
                            date_col: str = 'date') -> pd.DataFrame:
 	"""
@@ -187,7 +187,7 @@ def add_days_since(df: pd.DataFrame,
 	----------
 	df : pd.DataFrame
 		Aggregated user-day DataFrame (typically output from aggregate_user_day_activity)
-	columns_to_track : list, default ['Submit Downgrade', 'Submit Upgrade', 'Cancel']
+	columns_to_track : list, default ['Submit Downgrade', 'Submit Upgrade']
 		List of column names to create "days since" tracking for
 	user_col : str, default 'userId'
 		Column name identifying the user
@@ -207,10 +207,10 @@ def add_days_since(df: pd.DataFrame,
 	Example
 	-------
 	>>> df_agg = add_days_since(df_agg, 
-	...     columns_to_track=['Submit Downgrade', 'Submit Upgrade', 'Cancel'])
+	...     columns_to_track=['Submit Downgrade', 'Submit Upgrade'])
 	>>> print(df_agg.columns)
 	['userId', 'date', ..., 'days_since_submit_downgrade', 
-	 'days_since_submit_upgrade', 'days_since_cancel']
+	 'days_since_submit_upgrade']
 	"""
 
 	# Validate required columns
@@ -367,4 +367,128 @@ def add_rolling_averages(df: pd.DataFrame,
 	result = pd.concat(processed_users, ignore_index=True)
 	result[date_col] = result[date_col].dt.date
 
+	return result
+
+
+def add_thumbs_ratio(df: pd.DataFrame, 
+                     thumbs_up_col: str = 'Thumbs Up',
+                     thumbs_down_col: str = 'Thumbs Down') -> pd.DataFrame:
+	"""
+	Add thumbs up to thumbs down ratio feature.
+	
+	Calculates the ratio of thumbs up to total thumbs interactions (up + down).
+	Handles division by zero by setting ratio to 0.5 when no thumbs interactions exist.
+	
+	Parameters
+	----------
+	df : pd.DataFrame
+		Input dataframe with thumbs up/down activity
+	thumbs_up_col : str
+		Column name for thumbs up counts
+	thumbs_down_col : str
+		Column name for thumbs down counts
+	
+	Returns
+	-------
+	pd.DataFrame
+		Input dataframe with new 'thumbs_ratio' column added
+	"""
+	df = df.copy()
+	
+	# Calculate total thumbs interactions
+	total_thumbs = df[thumbs_up_col] + df[thumbs_down_col]
+	
+	# Calculate ratio: thumbs_up / (thumbs_up + thumbs_down)
+	# When no thumbs interactions, set to 0.5 (neutral)
+	df['thumbs_ratio'] = df[thumbs_up_col] / total_thumbs
+	df['thumbs_ratio'] = df['thumbs_ratio'].fillna(0.5)
+	
+	# Handle any remaining NaN or inf values
+	df['thumbs_ratio'] = df['thumbs_ratio'].replace([float('inf'), float('-inf')], 0.5)
+	
+	print(f"Added thumbs_ratio feature")
+	print(f"thumbs_ratio range: [{df['thumbs_ratio'].min():.2f}, {df['thumbs_ratio'].max():.2f}]")
+	
+	return df
+
+
+def add_days_active_last_n_days(df: pd.DataFrame,
+                                user_col: str = 'userId',
+                                date_col: str = 'date',
+                                n_days: int = 30,
+                                activity_threshold: float = 0) -> pd.DataFrame:
+	"""
+	Add feature counting days with activity in last n days.
+	
+	For each user on each date, counts how many unique days in the preceding n days
+	had activity (where activity is any row with activity > activity_threshold).
+	
+	Parameters
+	----------
+	df : pd.DataFrame
+		Input dataframe with user activity
+	user_col : str
+		Column identifying users
+	date_col : str
+		Column containing dates
+	n_days : int
+		Number of days to look back (default: 30)
+	activity_threshold : float
+		Minimum activity level to count as "active day" (default: 0)
+	
+	Returns
+	-------
+	pd.DataFrame
+		Input dataframe with new 'days_active_last_Xd' column added
+	"""
+	df = df.copy()
+	
+	# Ensure date column is datetime for calculations
+	df[date_col] = pd.to_datetime(df[date_col])
+	
+	processed_users = []
+	
+	for user_id in df[user_col].unique():
+		user_data = df[df[user_col] == user_id].copy()
+		user_data = user_data.sort_values(date_col).reset_index(drop=True)
+		
+		days_active = []
+		
+		for idx, row in user_data.iterrows():
+			current_date = row[date_col]
+			window_start = current_date - pd.Timedelta(days=n_days-1)
+			
+			# Count unique days with activity in the window
+			# (including the current day)
+			window_data = user_data[
+				(user_data[date_col] >= window_start) & 
+				(user_data[date_col] <= current_date)
+			]
+			
+			# Count days where user had any activity
+			# Sum across all activity columns (numeric columns except identifiers)
+			activity_cols = [col for col in window_data.columns 
+			                 if col not in [user_col, date_col] 
+			                 and window_data[col].dtype in ['int64', 'float64']]
+			
+			if activity_cols:
+				total_activity_per_day = window_data[activity_cols].sum(axis=1)
+				days_with_activity = (total_activity_per_day > activity_threshold).sum()
+			else:
+				days_with_activity = 0
+			
+			days_active.append(days_with_activity)
+		
+		user_data[f'days_active_last_{n_days}d'] = days_active
+		processed_users.append(user_data)
+	
+	result = pd.concat(processed_users, ignore_index=True)
+	
+	# Convert date back to date type if it was originally
+	if result[date_col].dtype != 'object':
+		result[date_col] = result[date_col].dt.date
+	
+	print(f"Added days_active_last_{n_days}d feature")
+	print(f"days_active_last_{n_days}d range: [{result[f'days_active_last_{n_days}d'].min()}, {result[f'days_active_last_{n_days}d'].max()}]")
+	
 	return result
