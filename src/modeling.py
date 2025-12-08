@@ -3,9 +3,10 @@ Modeling functions for churn prediction.
 """
 
 import pandas as pd
+import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, balanced_accuracy_score
 import xgboost as xgb
 
 
@@ -119,10 +120,12 @@ def evaluate_model(model, X_test, y_test):
     y_pred_proba = model.predict_proba(X_test)[:, 1]
     
     roc_auc = roc_auc_score(y_test, y_pred_proba)
+    balanced_acc = balanced_accuracy_score(y_test, y_pred)
     conf_matrix = confusion_matrix(y_test, y_pred)
     class_report = classification_report(y_test, y_pred)
     
     print("\n=== Model Performance ===")
+    print(f"Balanced Accuracy: {balanced_acc:.4f}")
     print(f"ROC-AUC Score: {roc_auc:.4f}")
     print("\nConfusion Matrix:")
     print(conf_matrix)
@@ -130,6 +133,7 @@ def evaluate_model(model, X_test, y_test):
     print(class_report)
     
     results = {
+        'balanced_accuracy': balanced_acc,
         'roc_auc': roc_auc,
         'confusion_matrix': conf_matrix,
         'classification_report': class_report,
@@ -281,7 +285,7 @@ def train_xgboost(X_train, y_train, n_estimators=100, max_depth=6,
                   learning_rate=0.1, random_state=42, scale_pos_weight=None, 
                   n_jobs=-1, **kwargs):
     """
-    Train an XGBoost classifier.
+    Train an XGBoost classifier optimized for balanced accuracy.
     
     Parameters:
     -----------
@@ -315,7 +319,14 @@ def train_xgboost(X_train, y_train, n_estimators=100, max_depth=6,
         scale_pos_weight = neg_count / pos_count
         print(f"Calculated scale_pos_weight: {scale_pos_weight:.2f}")
     
-    print("Training XGBoost...")
+    # Custom eval metric for balanced accuracy
+    def balanced_accuracy_eval(y_pred, dtrain):
+        y_true = dtrain.get_label()
+        y_pred_binary = (y_pred > 0.5).astype(int)
+        score = balanced_accuracy_score(y_true, y_pred_binary)
+        return 'balanced_accuracy', score
+    
+    print("Training XGBoost optimized for balanced accuracy...")
     model = xgb.XGBClassifier(
         n_estimators=n_estimators,
         max_depth=max_depth,
@@ -323,7 +334,7 @@ def train_xgboost(X_train, y_train, n_estimators=100, max_depth=6,
         random_state=random_state,
         scale_pos_weight=scale_pos_weight,
         n_jobs=n_jobs,
-        eval_metric='logloss',
+        eval_metric=balanced_accuracy_eval,
         **kwargs
     )
     model.fit(X_train, y_train)
