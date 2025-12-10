@@ -237,8 +237,14 @@ def aggregate_user_day_activity(df: pd.DataFrame,
 	per_day_counts = df_copy.groupby([user_col, 'date']).size().reset_index(name='event_count')
 	if 'sessionId' in df_copy.columns:
 		session_counts = df_copy.groupby([user_col, 'date'])['sessionId'].nunique().reset_index(name='session_count')
+		# Calculate average session length per user per day
+		# Session length: difference between max and min time per session
+		session_times = df_copy.groupby([user_col, 'date', 'sessionId'])[time_col].agg(['min', 'max'])
+		session_times['session_length'] = (pd.to_datetime(session_times['max']) - pd.to_datetime(session_times['min'])).dt.total_seconds()
+		avg_session_length = session_times.groupby([user_col, 'date'])['session_length'].mean().reset_index(name='avg_session_length')
 	else:
 		session_counts = None
+		avg_session_length = None
 	
 	# Get user registration dates
 	if registration_col in df_copy.columns:
@@ -266,9 +272,14 @@ def aggregate_user_day_activity(df: pd.DataFrame,
 	df_aggregated = df_aggregated.merge(per_day_counts, on=[user_col, 'date'], how='left')
 	if session_counts is not None:
 		df_aggregated = df_aggregated.merge(session_counts, on=[user_col, 'date'], how='left')
+		if avg_session_length is not None:
+			df_aggregated = df_aggregated.merge(avg_session_length, on=[user_col, 'date'], how='left')
+		else:
+			df_aggregated['avg_session_length'] = 0.0
 	else:
 		# If sessionId is missing, approximate sessions by treating each day as one session when active
 		df_aggregated['session_count'] = 1
+		df_aggregated['avg_session_length'] = 0.0
 
 	# Active flag and events-per-session ratio
 	df_aggregated['active_flag'] = (df_aggregated['event_count'] > 0).astype(int)
