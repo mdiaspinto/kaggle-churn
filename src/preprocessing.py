@@ -49,6 +49,10 @@ def compute_cancellation(df: pd.DataFrame,
 	# Work with a local copy and parse times safely
 	df_loc = df.copy()
 
+	# Convert categorical columns to string to avoid fillna issues
+	if hasattr(df_loc[page_col], 'cat'):
+		df_loc[page_col] = df_loc[page_col].astype(str)
+
 	# Identify cancellation rows
 	page_series = df_loc[page_col].fillna('').astype(str)
 	is_cancel = page_series.str.contains('Cancellation Confirmation', na=False)
@@ -70,6 +74,84 @@ def compute_cancellation(df: pd.DataFrame,
 	result[target_col] = result[user_col].isin(cancelled_users).astype(int)
 
 	return result
+
+
+def compute_cancellation_batch(df: pd.DataFrame,
+								dates_df: pd.DataFrame,
+								user_col: str = 'userId',
+								page_col: str = 'page',
+								time_col: str = 'time',
+								date_col: str = 'date',
+								window_days: int = 10) -> pd.DataFrame:
+	"""
+	Efficiently compute cancellation targets for multiple dates at once.
+	
+	Much faster than calling compute_cancellation in a loop.
+	
+	Parameters
+	----------
+	df : pd.DataFrame
+		Raw event-level dataframe
+	dates_df : pd.DataFrame
+		Aggregated dataframe with userId and date columns for which targets should be computed
+	user_col : str
+		Column name for user ID
+	page_col : str
+		Column name for page/event type
+	time_col : str
+		Column name for event timestamp
+	date_col : str
+		Column name for date
+	window_days : int
+		Number of days to look ahead for cancellation
+	
+	Returns
+	-------
+	pd.DataFrame
+		DataFrame with userId, date, and churn_status columns
+	"""
+	if user_col not in df.columns or page_col not in df.columns or time_col not in df.columns:
+		raise ValueError("Missing required columns in raw data")
+	
+	# Convert categorical columns to string if needed
+	df_copy = df.copy()
+	if hasattr(df_copy[page_col], 'cat'):
+		df_copy[page_col] = df_copy[page_col].astype(str)
+	
+	# Identify all cancellation events
+	page_series = df_copy[page_col].fillna('').astype(str)
+	is_cancel = page_series.str.contains('Cancellation Confirmation', na=False, case=False)
+	cancellations = df_copy.loc[is_cancel, [user_col, time_col]].copy()
+	cancellations[user_col] = cancellations[user_col].astype(int)
+	cancellations[time_col] = pd.to_datetime(cancellations[time_col])
+	
+	# For each date in dates_df, check if user cancelled within window
+	dates_df_copy = dates_df[[user_col, date_col]].copy().drop_duplicates()
+	dates_df_copy['date_dt'] = pd.to_datetime(dates_df_copy[date_col])
+	dates_df_copy[user_col] = dates_df_copy[user_col].astype(int)
+	
+	# Add window bounds
+	dates_df_copy['window_end'] = dates_df_copy['date_dt'] + pd.Timedelta(days=window_days)
+	
+	# Merge to find cancellations within each window
+	merged = dates_df_copy.merge(
+		cancellations,
+		on=user_col,
+		how='left'
+	)
+	
+	# Check if cancellation falls within window
+	merged['in_window'] = (
+		(merged[time_col] >= merged['date_dt']) &
+		(merged[time_col] <= merged['window_end'])
+	)
+	
+	# Get churn status (1 if any cancellation in window, 0 otherwise)
+	churn_status = merged.groupby([user_col, date_col])['in_window'].any().astype(int).reset_index()
+	churn_status.columns = [user_col, date_col, 'churn_status']
+	churn_status[user_col] = churn_status[user_col].astype(int)  # Ensure int type
+	
+	return churn_status
 
 
 def aggregate_user_day_activity(df: pd.DataFrame,
