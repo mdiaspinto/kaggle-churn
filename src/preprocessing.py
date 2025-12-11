@@ -236,12 +236,27 @@ def aggregate_user_day_activity(df: pd.DataFrame,
 	# Per-day event counts and session counts (when sessionId is available)
 	per_day_counts = df_copy.groupby([user_col, 'date']).size().reset_index(name='event_count')
 	if 'sessionId' in df_copy.columns:
-		session_counts = df_copy.groupby([user_col, 'date'])['sessionId'].nunique().reset_index(name='session_count')
-		# Calculate average session length per user per day
-		# Session length: difference between max and min time per session
-		session_times = df_copy.groupby([user_col, 'date', 'sessionId'])[time_col].agg(['min', 'max'])
-		session_times['session_length'] = (pd.to_datetime(session_times['max']) - pd.to_datetime(session_times['min'])).dt.total_seconds()
-		avg_session_length = session_times.groupby([user_col, 'date'])['session_length'].mean().reset_index(name='avg_session_length')
+		# OPTIMIZED: Single-pass aggregation for session count and avg session length
+		# This avoids creating the massive intermediate session_times DataFrame
+		def calc_session_stats(group):
+			# Count unique sessions
+			session_count = group['sessionId'].nunique()
+			
+			# Calculate average session duration
+			session_durations = (
+				group.groupby('sessionId')[time_col]
+				.apply(lambda x: (pd.to_datetime(x.max()) - pd.to_datetime(x.min())).total_seconds())
+			)
+			avg_duration = session_durations.mean() if len(session_durations) > 0 else 0.0
+			
+			return pd.Series({
+				'session_count': session_count,
+				'avg_session_length': avg_duration
+			})
+		
+		session_stats = df_copy.groupby([user_col, 'date']).apply(calc_session_stats).reset_index()
+		session_counts = session_stats[[user_col, 'date', 'session_count']]
+		avg_session_length = session_stats[[user_col, 'date', 'avg_session_length']]
 	else:
 		session_counts = None
 		avg_session_length = None
@@ -292,28 +307,33 @@ def aggregate_user_day_activity(df: pd.DataFrame,
 	if drop_cancellation and 'Cancellation Confirmation' in df_aggregated.columns:
 		df_aggregated = df_aggregated.drop(columns=['Cancellation Confirmation'])
 	
-	# Fill missing days with zeros per user if requested
+	# Fill missing days with zeros per user if requested (VECTORIZED APPROACH)
 	if fill_missing_days:
 		activity_cols = [col for col in df_aggregated.columns if col not in [user_col, 'date']]
-		filled_users = []
 		
-		for user_id, user_data in df_aggregated.groupby(user_col):
-			# Create full date range for this user
-			full_range = pd.date_range(user_data['date'].min(), user_data['date'].max(), freq='D')
-			
-			# Reindex to include all days
-			user_filled = user_data.set_index('date').reindex(full_range)
-			user_filled[user_col] = user_id
-			
-			# Fill activity columns with zeros for inactive days
-			user_filled[activity_cols] = user_filled[activity_cols].fillna(0)
-			int_cols = [col for col in activity_cols if col != 'events_per_session']
-			user_filled[int_cols] = user_filled[int_cols].astype(int)
-			
-			user_filled.index.name = 'date'
-			filled_users.append(user_filled.reset_index())
+		# Get per-user date ranges
+		user_date_ranges = df_aggregated.groupby(user_col)['date'].agg(['min', 'max'])
 		
-		df_aggregated = pd.concat(filled_users, ignore_index=True)
+		# Build list of (user, date) tuples only for each user's active period
+		user_date_pairs = []
+		for user_id, row in user_date_ranges.iterrows():
+			dates = pd.date_range(row['min'], row['max'], freq='D')
+			user_date_pairs.extend([(user_id, d) for d in dates])
+		
+		# Create complete index from pairs
+		complete_df = pd.DataFrame(user_date_pairs, columns=[user_col, 'date'])
+		
+		# Merge with aggregated data
+		df_aggregated = complete_df.merge(df_aggregated, on=[user_col, 'date'], how='left')
+		
+		# Fill missing values with 0
+		df_aggregated[activity_cols] = df_aggregated[activity_cols].fillna(0)
+		
+		# Convert to appropriate types
+		int_cols = [col for col in activity_cols if col not in ['events_per_session', 'avg_session_length']]
+		for col in int_cols:
+			if col in df_aggregated.columns:
+				df_aggregated[col] = df_aggregated[col].astype(int)
 	
 	# Add level column with forward-filling
 	if level_per_day is not None:
