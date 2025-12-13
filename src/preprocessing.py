@@ -1051,6 +1051,43 @@ class CancellationTargetTransformerModular(BaseEstimator, TransformerMixin):
 		return result
 
 
+class RawDataSplitter(BaseEstimator, TransformerMixin):
+	"""
+	Filters raw event data by cutoff date at the start of the pipeline.
+	
+	This ensures temporal integrity - only data before cutoff_date is used
+	for training, preventing future data leakage.
+	
+	Parameters
+	----------
+	cutoff_date : str or pd.Timestamp
+		Maximum date to include in the data (inclusive)
+	time_col : str, default 'time'
+		Name of the timestamp column
+	"""
+	def __init__(self, cutoff_date, time_col='time'):
+		self.cutoff_date = pd.to_datetime(cutoff_date)
+		self.time_col = time_col
+	
+	def fit(self, X, y=None):
+		"""No fitting needed - this is a stateless filter."""
+		return self
+	
+	def transform(self, X):
+		"""Filter data to only include records before cutoff_date."""
+		if X is None or len(X) == 0:
+			return X
+		
+		X_copy = X.copy()
+		X_copy['_temp_time'] = pd.to_datetime(X_copy[self.time_col])
+		X_filtered = X_copy[X_copy['_temp_time'] <= self.cutoff_date].copy()
+		X_filtered = X_filtered.drop(columns=['_temp_time'])
+		
+		print(f"RawDataSplitter: Filtered to {len(X_filtered):,} events (<= {self.cutoff_date.date()})")
+		
+		return X_filtered
+
+
 class RollingEventAggregator(BaseEstimator, TransformerMixin):
 	"""
 	Computes rolling average features DIRECTLY from raw event data.
@@ -1188,7 +1225,7 @@ class RollingEventAggregator(BaseEstimator, TransformerMixin):
 # PIPELINE FACTORY AND CROSS-VALIDATION UTILITIES
 # ============================================================================
 
-def create_feature_pipeline(cutoff_date, use_modular=True, window_days=10, mode='train'):
+def create_feature_pipeline(cutoff_date, window_days=10, mode='train'):
 	"""
 	Factory function to create a fresh feature engineering pipeline.
 	
@@ -1200,9 +1237,6 @@ def create_feature_pipeline(cutoff_date, use_modular=True, window_days=10, mode=
 	----------
 	cutoff_date : str or pd.Timestamp
 		Date cutoff for training data (data before this date will be used)
-	use_modular : bool, default True
-		If True, uses new modular transformers (BasicEventAggregator, etc.)
-		If False, uses old monolithic UserDayAggregator (for backward compatibility)
 	window_days : int, default 10
 		Number of days to look ahead for churn prediction
 	mode : str, default 'train'
@@ -1216,80 +1250,63 @@ def create_feature_pipeline(cutoff_date, use_modular=True, window_days=10, mode=
 	Example
 	-------
 	>>> from sklearn.pipeline import Pipeline
+	>>> # Create pipeline for a specific cutoff date
 	>>> fold_pipeline = create_feature_pipeline(cutoff_date='2018-10-15')
-	>>> # Fit and transform with fold-specific raw data
-	>>> raw_fold_data = df_raw[df_raw['time'] <= '2018-10-15']
-	>>> features = fold_pipeline.fit_transform(raw_fold_data)
+	>>> # Fit transformers that need raw data
+	>>> fold_pipeline.named_steps['accumulated'].fit(None, raw_df=df_raw)
+	>>> fold_pipeline.named_steps['page_interactions'].fit(None, raw_df=df_raw)
+	>>> fold_pipeline.named_steps['churn_target'].fit(None, raw_df=df_raw)
+	>>> # Transform raw data (cutoff date enforced by RawDataSplitter)
+	>>> features = fold_pipeline.fit_transform(df_raw)
 	"""
 	from sklearn.pipeline import Pipeline
 	
 	cutoff_date = pd.to_datetime(cutoff_date)
 	
-	if use_modular:
-		# New modular pipeline - cleaner and more efficient
-		pipeline_steps = [
-			# Step 1: Basic aggregation (page counts for rolling averages only)
-			('basic_agg', BasicEventAggregator(
-				pages_for_rolling=['Add Friend', 'Add to Playlist', 'Thumbs Up', 'Thumbs Down']
-			)),
-			
-			# Step 2: Compute rolling averages (7d and 14d)
-			('rolling_7d', RollingAverageTransformerModular(
-				pages=['Add Friend', 'Add to Playlist', 'Thumbs Up', 'Thumbs Down'],
-				window_days=7
-			)),
-			('rolling_14d', RollingAverageTransformerModular(
-				pages=['Add Friend', 'Add to Playlist', 'Thumbs Up', 'Thumbs Down'],
-				window_days=14
-			)),
-			
-			# Step 3: Compute trend features (7d vs 14d comparison)
-			('trend', TrendFeaturesTransformer(
-				pages=['Add Friend', 'Add to Playlist', 'Thumbs Up', 'Thumbs Down']
-			)),
-			
-			# Step 4: Add accumulated features (requires raw_df in fit)
-			('accumulated', AccumulatedFeaturesTransformer()),
-			
-			# Step 5: Add page interaction features (requires raw_df in fit)
-			('page_interactions', PageInteractionTransformer(
-				pages_to_track=['About', 'Help', 'Settings', 'Save Settings', 'Home']
-			)),
-		]
+	# Modular pipeline with clean feature engineering steps
+	pipeline_steps = [
+		# Step 0: Filter data by cutoff date (temporal integrity)
+		('raw_splitter', RawDataSplitter(cutoff_date=cutoff_date)),
 		
-		# Only add churn target transformer in training mode
-		if mode == 'train':
-			pipeline_steps.append(
-				('churn_target', CancellationTargetTransformerModular(window_days=window_days))
-			)
+		# Step 1: Basic aggregation (page counts for rolling averages only)
+		('basic_agg', BasicEventAggregator(
+			pages_for_rolling=['Add Friend', 'Add to Playlist', 'Thumbs Up', 'Thumbs Down']
+		)),
 		
-		# Final preprocessing step
+		# Step 2: Compute rolling averages (7d and 14d)
+		('rolling_7d', RollingAverageTransformerModular(
+			pages=['Add Friend', 'Add to Playlist', 'Thumbs Up', 'Thumbs Down'],
+			window_days=7
+		)),
+		('rolling_14d', RollingAverageTransformerModular(
+			pages=['Add Friend', 'Add to Playlist', 'Thumbs Up', 'Thumbs Down'],
+			window_days=14
+		)),
+		
+		# Step 3: Compute trend features (7d vs 14d comparison)
+		('trend', TrendFeaturesTransformer(
+			pages=['Add Friend', 'Add to Playlist', 'Thumbs Up', 'Thumbs Down']
+		)),
+		
+		# Step 4: Add accumulated features (requires raw_df in fit)
+		('accumulated', AccumulatedFeaturesTransformer()),
+		
+		# Step 5: Add page interaction features (requires raw_df in fit)
+		('page_interactions', PageInteractionTransformer(
+			pages_to_track=['About', 'Help', 'Settings', 'Save Settings', 'Home']
+		)),
+	]
+	
+	# Only add churn target transformer in training mode
+	if mode == 'train':
 		pipeline_steps.append(
-			('preprocessor', FeaturePreprocessor())
+			('churn_target', CancellationTargetTransformerModular(window_days=window_days))
 		)
-	else:
-		# Legacy pipeline structure (uses monolithic aggregator)
-		from sklearn.base import BaseEstimator, TransformerMixin
-		
-		class RawDataSplitter(BaseEstimator, TransformerMixin):
-			def __init__(self, cutoff_date, time_col='time'):
-				self.cutoff_date = pd.to_datetime(cutoff_date)
-				self.time_col = time_col
-			
-			def fit(self, X, y=None):
-				return self
-			
-			def transform(self, X):
-				X_copy = X.copy()
-				X_copy['time_dt'] = pd.to_datetime(X_copy[self.time_col])
-				result = X_copy[X_copy['time_dt'] < self.cutoff_date].copy()
-				return result
-		
-		# Old UserDayAggregator class would go here (kept for compatibility)
-		pipeline_steps = [
-			('raw_splitter', RawDataSplitter(cutoff_date=cutoff_date)),
-			# ... other legacy transformers
-		]
+	
+	# Final preprocessing step
+	pipeline_steps.append(
+		('preprocessor', FeaturePreprocessor())
+	)
 	
 	return Pipeline(pipeline_steps)
 
